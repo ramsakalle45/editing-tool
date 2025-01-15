@@ -1,4 +1,6 @@
+streamlit
 numpy
 pillow
 opencv-python
-pyvirtualdisplay
+pyopengl
+pyopengl-accelerate
