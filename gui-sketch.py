@@ -7,11 +7,11 @@ from typing import Tuple, Optional, Dict
 import logging
 from datetime import datetime
 
-from pyvirtualdisplay import Display
+# from pyvirtualdisplay import Display
 
-# Start a virtual display
-display = Display(visible=0, size=(800, 600))
-display.start()
+# # Start a virtual display
+# display = Display(visible=0, size=(800, 600))
+# display.start()
 
 
 # ----------------------------------------------------
