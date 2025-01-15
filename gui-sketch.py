@@ -3,9 +3,16 @@ from PIL import Image, ImageEnhance, ImageFilter
 from io import BytesIO
 import numpy as np
 import cv2
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Dict
 import logging
 from datetime import datetime
+
+# ----------------------------------------------------
+# Constants and Configuration
+# ----------------------------------------------------
+ALLOWED_EXTENSIONS = ["png", "jpg", "jpeg", "webp"]
+MAX_IMAGE_SIZE = 800
+DEFAULT_QUALITY = 85
 
 # ----------------------------------------------------
 # Configure logging
@@ -15,13 +22,6 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
-
-# ----------------------------------------------------
-# Constants and Configuration
-# ----------------------------------------------------
-ALLOWED_EXTENSIONS = ["png", "jpg", "jpeg", "webp"]
-MAX_IMAGE_SIZE = 800
-DEFAULT_QUALITY = 85
 
 class ImageProcessor:
     """Class to handle all image processing operations."""
@@ -51,16 +51,35 @@ class ImageProcessor:
         """Apply multiple image adjustments with error handling."""
         try:
             img = Image.fromarray(image)
+            
+            # Basic adjustments using PIL
+            basic_adjustments = {
+                'brightness': 'Brightness',
+                'contrast': 'Contrast',
+                'sharpness': 'Sharpness',
+                'saturation': 'Color'
+            }
 
-            for adjustment, value in adjustments.items():
-                if adjustment in ['brightness', 'contrast', 'sharpness']:
-                    enhancer = getattr(ImageEnhance, adjustment.capitalize())(img)
-                    img = enhancer.enhance(value)
-                elif adjustment == 'saturation':
-                    enhancer = ImageEnhance.Color(img)
-                    img = enhancer.enhance(value)
+            for adj, enhancer_name in basic_adjustments.items():
+                if adj in adjustments:
+                    enhancer = getattr(ImageEnhance, enhancer_name)(img)
+                    img = enhancer.enhance(adjustments[adj])
 
             img = np.array(img.convert("RGB"))
+
+            # Advanced adjustments using OpenCV
+            if 'exposure' in adjustments:
+                img = cv2.convertScaleAbs(img, alpha=adjustments['exposure'], beta=0)
+
+            if 'white_balance' in adjustments:
+                wb = adjustments['white_balance']
+                wb_matrix = np.array([1 + wb/100, 1, 1 - wb/100])
+                img = (img * wb_matrix).clip(0, 255).astype(np.uint8)
+
+            if 'vibrance' in adjustments:
+                hsv = cv2.cvtColor(img, cv2.COLOR_RGB2HSV)
+                hsv[..., 1] = hsv[..., 1] * adjustments['vibrance']
+                img = cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB)
 
             if 'hue' in adjustments:
                 hsv = cv2.cvtColor(img, cv2.COLOR_RGB2HSV)
@@ -69,10 +88,24 @@ class ImageProcessor:
 
             if 'temperature' in adjustments:
                 temp = adjustments['temperature']
-                temp_filter = np.array([1.0 + temp * 0.01, 1.0, 1.0 - temp * 0.01])
-                img = (img * temp_filter).clip(0, 255).astype(np.uint8)
+                temp_matrix = np.array([1 + temp/100, 1, 1 - temp/100])
+                img = (img * temp_matrix).clip(0, 255).astype(np.uint8)
 
-            return img
+            if 'noise_reduction' in adjustments:
+                img = cv2.fastNlMeansDenoisingColored(img, None, adjustments['noise_reduction'], 10, 7, 21)
+
+            if 'hdr_blending' in adjustments:
+                alpha = adjustments['hdr_blending']
+                img = cv2.addWeighted(img, alpha, cv2.GaussianBlur(img, (5, 5), 0), 1 - alpha, 0)
+
+            if 'clarity' in adjustments:
+                gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+                clarity_mask = cv2.GaussianBlur(gray, (0, 0), 3)
+                img = cv2.addWeighted(img, 1 + adjustments['clarity'], 
+                                    cv2.cvtColor(clarity_mask, cv2.COLOR_GRAY2RGB), 
+                                    -adjustments['clarity'], 0)
+
+            return img.clip(0, 255).astype(np.uint8)
 
         except Exception as e:
             logger.error(f"Error applying adjustments: {e}")
@@ -80,11 +113,21 @@ class ImageProcessor:
             return image
 
     @staticmethod
-    def apply_effect(image: np.ndarray, effect: str, params: dict) -> np.ndarray:
-        """Apply selected effect to the image."""
+    def apply_effect(image: np.ndarray, effect: str, params: dict, adjustments_history: Dict[str, dict]) -> np.ndarray:
+        """Apply selected effect to the image while maintaining adjustment history."""
         try:
+            # Store current adjustments in history if not exists
+            if effect not in adjustments_history:
+                adjustments_history[effect] = params.copy()
+            else:
+                # Update existing parameters with new ones
+                adjustments_history[effect].update(params)
+
+            # Apply the effect using stored parameters
+            effect_params = adjustments_history[effect]
+            
             if effect == "Pencil Sketch":
-                return ImageProcessor._create_pencil_sketch(image, params.get('blur_intensity', 21))
+                return ImageProcessor._create_pencil_sketch(image, effect_params.get('blur_intensity', 21))
             elif effect == "Grayscale":
                 return cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
             elif effect == "Vintage":
@@ -93,6 +136,7 @@ class ImageProcessor:
                 return ImageProcessor._create_oil_painting_effect(image)
             else:
                 return image
+
         except Exception as e:
             logger.error(f"Error applying effect {effect}: {e}")
             st.error(f"Error applying {effect} effect")
@@ -150,8 +194,8 @@ class StreamlitUI:
         """)
 
     @staticmethod
-    def create_sidebar_controls() -> Tuple[dict, dict]:
-        """Create and return all sidebar controls."""
+    def create_sidebar_controls() -> Tuple[str, dict, dict]:
+        """Create and return all sidebar controls with enhanced adjustments."""
         st.sidebar.title("Controls")
         
         effect = st.sidebar.selectbox(
@@ -168,13 +212,20 @@ class StreamlitUI:
         st.sidebar.markdown("---")
         st.sidebar.subheader("Image Adjustments")
         
+        # Enhanced adjustments
         adjustments = {
             'brightness': st.sidebar.slider("Brightness", 0.5, 3.0, 1.0, step=0.1),
             'contrast': st.sidebar.slider("Contrast", 0.5, 3.0, 1.0, step=0.1),
+            'exposure': st.sidebar.slider("Exposure", 0.5, 2.0, 1.0, step=0.1),
+            'white_balance': st.sidebar.slider("White Balance", -100, 100, 0, step=5),
             'saturation': st.sidebar.slider("Saturation", 0.0, 3.0, 1.0, step=0.1),
+            'vibrance': st.sidebar.slider("Vibrance", 0.5, 2.0, 1.0, step=0.1),
             'hue': st.sidebar.slider("Hue", -50, 50, 0, step=1),
             'temperature': st.sidebar.slider("Temperature", -100, 100, 0, step=5),
-            'sharpness': st.sidebar.slider("Sharpness", 0.5, 3.0, 1.0, step=0.1)
+            'sharpness': st.sidebar.slider("Sharpness", 0.5, 3.0, 1.0, step=0.1),
+            'clarity': st.sidebar.slider("Clarity", 0.0, 1.0, 0.0, step=0.1),
+            'noise_reduction': st.sidebar.slider("Noise Reduction", 0, 100, 0, step=5),
+            'hdr_blending': st.sidebar.slider("HDR Blending", 0.0, 1.0, 0.5, step=0.1)
         }
         
         return effect, adjustments, effect_params
@@ -209,7 +260,7 @@ class StreamlitUI:
                 st.error("Error exporting image. Please try again.")
 
 def main():
-    """Main application function."""
+    """Main application function with enhanced adjustment history."""
     processor = ImageProcessor()
     ui = StreamlitUI()
     
@@ -218,6 +269,10 @@ def main():
     
     # Create sidebar controls
     effect, adjustments, effect_params = ui.create_sidebar_controls()
+
+    # Initialize session state for adjustment history if not exists
+    if 'adjustments_history' not in st.session_state:
+        st.session_state.adjustments_history = {}
     
     # Image upload
     image_file = st.file_uploader(
@@ -235,7 +290,12 @@ def main():
             
             # Apply effect if selected
             if effect != "None":
-                processed = processor.apply_effect(np_image, effect, effect_params)
+                processed = processor.apply_effect(
+                    np_image, 
+                    effect, 
+                    effect_params, 
+                    st.session_state.adjustments_history
+                )
             else:
                 processed = np_image.copy()
             
